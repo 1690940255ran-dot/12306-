@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "adapter": "mock",
+  "from_station": "北京南",
+  "to_station": "上海虹桥",
+  "dates": [
+    "2026-09-25"
+  ],
+  "train_codes": [],
+  "seat_priority": [
+    "二等座"
+  ],
+  "passenger_count": 1,
+  "max_total_amount_fen": 80000,
+  "interval_seconds": 60
+}
+

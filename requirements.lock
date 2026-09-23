@@ -1,0 +1,11 @@
+greenlet==3.5.6
+packaging==26.3
+playwright==1.63.0
+pyee==13.0.1
+PySide6==6.11.2
+PySide6_Addons==6.11.2
+PySide6_Essentials==6.11.2
+# Install the checked-out project without embedding a machine-specific path.
+-e .
+shiboken6==6.11.2
+typing_extensions==4.16.0

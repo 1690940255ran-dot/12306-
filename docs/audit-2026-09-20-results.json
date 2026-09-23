@@ -1,0 +1,135 @@
+[
+  {
+    "id": "R01",
+    "status": "PASS",
+    "detail": {
+      "first_refresh_seconds_relative_to_sale": 0.0
+    }
+  },
+  {
+    "id": "R02",
+    "status": "PASS",
+    "detail": {
+      "resolved": "2026-09-21T08:00:00+08:00",
+      "configured": "2026-09-21T08:00:00+08:00"
+    }
+  },
+  {
+    "id": "R03",
+    "status": "PASS",
+    "detail": {
+      "result": "PENDING_PAYMENT"
+    }
+  },
+  {
+    "id": "R04",
+    "status": "PASS",
+    "detail": {
+      "auto_submit": false,
+      "blocked": "抢票模式必须显式开启 auto_submit（或用演练模式 dry_run）。"
+    }
+  },
+  {
+    "id": "R05",
+    "status": "PASS",
+    "detail": {
+      "task": "STOPPED",
+      "blocked": "任务状态 STOPPED 不允许提交。"
+    }
+  },
+  {
+    "id": "R06",
+    "status": "PASS",
+    "detail": {
+      "new_task_budget_fen": 1,
+      "blocked": "任务配置在准备订单后发生变化，原订单意图已失效。"
+    }
+  },
+  {
+    "id": "R07",
+    "status": "PASS",
+    "detail": {
+      "delete_blocked": "该订单记录可能已在官方产生订单，不能删除；请先通过官方订单页核对到明确终态。"
+    }
+  },
+  {
+    "id": "R08",
+    "status": "PASS",
+    "detail": {
+      "unrelated_page": "UNKNOWN",
+      "retry_prompt": "UNKNOWN"
+    }
+  },
+  {
+    "id": "R09",
+    "status": "PASS",
+    "detail": {
+      "travel_date_input": "2026-10-05",
+      "sale_at_output": null
+    }
+  },
+  {
+    "id": "R10",
+    "status": "PASS",
+    "detail": {
+      "actual_query_start_offsets": [
+        0.0,
+        15.0,
+        30.0
+      ],
+      "planned_offsets": [
+        0,
+        15,
+        30
+      ]
+    }
+  },
+  {
+    "id": "R11",
+    "status": "PASS",
+    "detail": {
+      "calls_at_same_virtual_time": 1
+    }
+  },
+  {
+    "id": "R12",
+    "status": "PASS",
+    "detail": {
+      "first_wait": 0.0,
+      "second_wait": 15.0
+    }
+  },
+  {
+    "id": "R13",
+    "status": "PASS",
+    "detail": {
+      "server_retry_after": 3600,
+      "actual_cooldown": 3600.0
+    }
+  },
+  {
+    "id": "R14",
+    "status": "PASS",
+    "detail": {
+      "two_probe_permissions": [
+        true,
+        false
+      ]
+    }
+  },
+  {
+    "id": "R15",
+    "status": "PASS",
+    "detail": {
+      "adapter_has_called_logout_method": true
+    }
+  },
+  {
+    "id": "S01",
+    "status": "PASS",
+    "detail": {
+      "flow": "doctor/query/create/list/run/show/pause/stop/reject_restart",
+      "run_state": "MATCHED"
+    }
+  }
+]

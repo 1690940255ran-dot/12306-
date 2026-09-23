@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "railassist"
+version = "0.1.0"
+description = "Local 12306 ticket assistant framework with an offline mock adapter"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.7"]
+browser = ["playwright>=1.45"]
+
+[project.scripts]
+railassist = "railassist.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
