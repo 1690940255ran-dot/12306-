@@ -1,0 +1,20 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.runtime/
+.coverage
+*.db
+*.db-shm
+*.db-wal
+*.jsonl
+.env
+
+.runtime/
+session.bin
+
+# 个人/本地内容（不上传）
+.workbuddy-ai/
+docs/*操作单*
