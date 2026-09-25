@@ -1,0 +1,139 @@
+{
+  "started_at": "2026-09-24T21:49:04",
+  "args": {
+    "from_station": "江都",
+    "to_station": "南京",
+    "date": "2026-10-08",
+    "train": "C3856",
+    "runs": 1,
+    "warmup_minutes": 70.0,
+    "data_dir": ".runtime\\prod",
+    "json_out": null
+  },
+  "records": [
+    {
+      "path": "direct_raw",
+      "ok": false,
+      "ms": null,
+      "note": "直达后确认页未就绪或车次不符（真实环境会回退点击）",
+      "run": 1
+    },
+    {
+      "path": "direct_reencoded",
+      "ok": false,
+      "ms": null,
+      "note": "直达后确认页未就绪或车次不符（真实环境会回退点击）",
+      "run": 1
+    },
+    {
+      "path": "click",
+      "ok": false,
+      "ms": 72422.00000000048,
+      "note": "点击路径失败：RailAssistError: 点击预订后未到达确认订单页（可能登录失效或触发核验）；已停止，不重试。｜诊断：车次=C3856；点击后 URL=https://kyfw.12306.cn/otn/leftTicket/init?linktypeid=dc&fs=%E6%B",
+      "run": 1
+    },
+    {
+      "path": "direct_raw",
+      "ok": false,
+      "ms": null,
+      "note": "直达后确认页未就绪或车次不符（真实环境会回退点击）",
+      "run": 1
+    }
+  ],
+  "warmup": [
+    {
+      "at_seconds": 0,
+      "booking_login_valid": true
+    },
+    {
+      "at_seconds": 241,
+      "booking_login_valid": true
+    },
+    {
+      "at_seconds": 481,
+      "booking_login_valid": true
+    },
+    {
+      "at_seconds": 722,
+      "booking_login_valid": true
+    },
+    {
+      "at_seconds": 962,
+      "booking_login_valid": true
+    },
+    {
+      "at_seconds": 1202,
+      "booking_login_valid": true
+    },
+    {
+      "at_seconds": 1443,
+      "booking_login_valid": true
+    },
+    {
+      "at_seconds": 1683,
+      "booking_login_valid": true
+    },
+    {
+      "at_seconds": 1924,
+      "booking_login_valid": true
+    },
+    {
+      "at_seconds": 2164,
+      "booking_login_valid": true
+    },
+    {
+      "at_seconds": 2404,
+      "booking_login_valid": true
+    },
+    {
+      "at_seconds": 2644,
+      "booking_login_valid": true
+    },
+    {
+      "at_seconds": 2885,
+      "booking_login_valid": true
+    },
+    {
+      "at_seconds": 3125,
+      "booking_login_valid": true
+    },
+    {
+      "at_seconds": 3365,
+      "booking_login_valid": true
+    },
+    {
+      "at_seconds": 3606,
+      "booking_login_valid": true
+    },
+    {
+      "at_seconds": 3846,
+      "booking_login_valid": true
+    },
+    {
+      "at_seconds": 4086,
+      "booking_login_valid": true
+    }
+  ],
+  "summary": {
+    "direct_raw": {
+      "runs_ok": 0,
+      "median_ms": null,
+      "min_ms": null,
+      "max_ms": null
+    },
+    "direct_reencoded": {
+      "runs_ok": 0,
+      "median_ms": null,
+      "min_ms": null,
+      "max_ms": null
+    },
+    "click": {
+      "runs_ok": 0,
+      "median_ms": null,
+      "min_ms": null,
+      "max_ms": null
+    },
+    "saved_by_direct_raw_ms": null,
+    "saved_by_direct_reencoded_ms": null
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "started_at": "2026-09-24T21:27:41",
+  "args": {
+    "from_station": "江都",
+    "to_station": "南京",
+    "date": "2026-10-08",
+    "train": "C3856",
+    "runs": 3,
+    "warmup_minutes": 0.0,
+    "data_dir": ".runtime\\prod",
+    "json_out": null
+  },
+  "records": [
+    {
+      "path": "direct",
+      "ok": false,
+      "ms": null,
+      "note": "命中行参数拼不出直达 URL（会回退点击路径）",
+      "run": 1
+    },
+    {
+      "path": "click",
+      "ok": true,
+      "ms": 2110.0000000001273,
+      "note": "",
+      "run": 1
+    },
+    {
+      "path": "direct",
+      "ok": false,
+      "ms": null,
+      "note": "命中行参数拼不出直达 URL（会回退点击路径）",
+      "run": 2
+    },
+    {
+      "path": "click",
+      "ok": true,
+      "ms": 1469.000000000051,
+      "note": "",
+      "run": 2
+    },
+    {
+      "path": "direct",
+      "ok": false,
+      "ms": null,
+      "note": "命中行参数拼不出直达 URL（会回退点击路径）",
+      "run": 3
+    },
+    {
+      "path": "click",
+      "ok": true,
+      "ms": 1407.0000000001528,
+      "note": "",
+      "run": 3
+    }
+  ],
+  "warmup": [],
+  "summary": {
+    "direct": {
+      "runs_ok": 0,
+      "median_ms": null,
+      "min_ms": null,
+      "max_ms": null
+    },
+    "click": {
+      "runs_ok": 3,
+      "median_ms": 1469,
+      "min_ms": 1407,
+      "max_ms": 2110
+    },
+    "saved_ms": null
+  }
+}

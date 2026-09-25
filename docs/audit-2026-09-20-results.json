@@ -125,6 +125,28 @@
     }
   },
   {
+    "id": "R16",
+    "status": "PASS",
+    "detail": {
+      "built_url_ok": true,
+      "unsafe_params_rejected": true,
+      "wrong_segment_rejected": true,
+      "hit_detail_params": 9,
+      "train_no_from_onclick": "540000C43600",
+      "adapter_has_direct_helpers": true,
+      "default_off_after_real_rejection": true
+    }
+  },
+  {
+    "id": "R17",
+    "status": "PASS",
+    "detail": {
+      "default_interval": 240,
+      "min_interval": 60,
+      "visit_page": "https://kyfw.12306.cn/otn/leftTicket/init"
+    }
+  },
+  {
     "id": "S01",
     "status": "PASS",
     "detail": {

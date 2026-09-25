@@ -9,7 +9,7 @@ import json
 import webbrowser
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
@@ -103,6 +103,11 @@ class MainWindow(QMainWindow):
         self.data_dir = data_dir
         self.worker: MonitorWorker | None = None
         self.rush_worker = None
+        self.keeper = None
+        # True=允许在一次性操作结束后自动恢复保活；False=用户已明确停用
+        # （退出登录 / 取消勾选 / 会话已被官方失效），不要自动重启。
+        self._resume_keeper = True
+        self._keeper_retired: set = set()    # 已主动停止的保活线程：忽略其结束回调
         self._jobs: list[JobThread] = []
         self._retired_workers: list = []  # 已结束线程，待 deleteLater
         self.setWindowTitle(f"RailAssist {__version__} — 12306 购票辅助（不会自动支付）")
@@ -118,6 +123,18 @@ class MainWindow(QMainWindow):
         self.tray = QSystemTrayIcon(self)
         self.tray.show()
         self.refresh_all()
+        # 启动即恢复保活：本地存有会话时，说明上次已扫码登录过。
+        # 抢票常在几小时后，而 12306 的登录态约 10 分钟无活动就失效——
+        # 打开软件这一刻就把保活接上，用户就不必在开抢前再扫一次码。
+        QTimer.singleShot(0, self._autostart_keeper)
+
+    def _autostart_keeper(self) -> None:
+        from railassist.infrastructure.secret_store import SecretStore
+        if not SecretStore(self.data_dir).path.exists():
+            return
+        if not self.keeper_check.isChecked():
+            return
+        self._start_keeper()
 
     # ---------- 页面构建 ----------
 
@@ -201,6 +218,11 @@ class MainWindow(QMainWindow):
     def _build_login_tab(self) -> QWidget:
         self.session_label = QLabel("登录状态：未知（点击“检查登录状态”）")
         self.remember_check = QCheckBox("使用加密保存的会话（配合“记住登录”）")
+        self.remember_check.setChecked(True)
+        self.keeper_check = QCheckBox(
+            "登录后自动保活（推荐；抢票前一直续期，避免到点又要重新扫码）")
+        self.keeper_check.setChecked(True)
+        self.keeper_check.toggled.connect(self._on_keeper_toggled)
         self.btn_check_login = QAction("检查登录状态", self)
         self.btn_login = QAction("登录 12306（官方窗口，本人操作）", self)
         self.btn_logout = QAction("退出登录并清除会话", self)
@@ -220,6 +242,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout()
         layout.addWidget(bar)
         layout.addWidget(self.remember_check)
+        layout.addWidget(self.keeper_check)
         layout.addWidget(self.session_label)
         layout.addWidget(self.cap_table)
         page = QWidget()
@@ -261,6 +284,9 @@ class MainWindow(QMainWindow):
             if job.isRunning():
                 QMessageBox.warning(self, "RailAssist", f"另一个操作正在进行（{busy_text}），请稍候。")
                 return
+        # 保活线程持有数据目录实例锁与浏览器会话：它不停，本操作会在实例锁上失败。
+        # 先让它让位（毫秒级），操作结束后按 _resume_keeper 自动恢复保活。
+        self._stop_keeper()
         remember = self.remember_check.isChecked() or use_remember
 
         def wrapped():
@@ -286,6 +312,8 @@ class MainWindow(QMainWindow):
         if on_done is not None:
             on_done(result)
         self.refresh_all()
+        # 一次性操作做完了，把保活还回去（否则用户会以为会话还在被维持）。
+        self._start_keeper()
 
     def _job_failed(self, job, message):
         if job in self._jobs:
@@ -293,6 +321,7 @@ class MainWindow(QMainWindow):
         self._retire_job(job)
         self.statusBar().clearMessage()
         QMessageBox.warning(self, "操作失败", message)
+        self._start_keeper()
 
     # ---------- 右键菜单与删除 ----------
 
@@ -517,6 +546,9 @@ class MainWindow(QMainWindow):
         if not config.passenger_refs:
             QMessageBox.warning(self, "RailAssist", "任务未配置乘车人姓名。")
             return
+        # 保活线程持有浏览器会话：抢票线程需要独占浏览器，必须先让位
+        # （否则两个 Chromium 同时用同一份会话，官方侧会判定为异常登录）。
+        self._stop_keeper()
         from railassist.ui.worker import RushWorker
         self.rush_worker = RushWorker(self.data_dir, task_id)
         self.rush_worker.status.connect(lambda m: self.statusBar().showMessage(m, 60000))
@@ -536,6 +568,8 @@ class MainWindow(QMainWindow):
         self.btn_rush.setText("开始抢票")
         self.btn_monitor.setEnabled(True)
         self.refresh_all()
+        # 抢票结束（未买到/已停止）后恢复保活：会话继续新鲜，随时可以再抢或走候补。
+        self._start_keeper()
         result = _json.loads(payload_json)
         outcome = result.get("outcome")
         if outcome == "PENDING_PAYMENT":
@@ -709,6 +743,60 @@ class MainWindow(QMainWindow):
 
     # ---------- 登录操作 ----------
 
+    def _start_keeper(self) -> None:
+        """启动登录保活线程（避免“提前一小时打开、到点又要扫码”）。"""
+        if self.keeper is not None or not self._resume_keeper:
+            return
+        if not self.keeper_check.isChecked():
+            return
+        if self.rush_worker is not None or self.worker is not None:
+            return
+        from railassist.ui.worker import SessionKeeperWorker
+        self.keeper = SessionKeeperWorker(self.data_dir)
+        self.keeper.status.connect(lambda m: self.statusBar().showMessage(m, 30000))
+        self.keeper.finished_run.connect(self._on_keeper_finished)
+        self.keeper.start()
+        self.session_label.setText("登录状态：保活中（等待抢票期间持续续期）")
+
+    def _on_keeper_toggled(self, checked: bool) -> None:
+        """勾选框：勾上=立刻开始保活（并允许后续自动恢复）；取消=停止保活。"""
+        self._resume_keeper = bool(checked)
+        if checked:
+            self._start_keeper()
+        else:
+            self._stop_keeper()
+            self.session_label.setText("登录状态：保活已关闭（会话可能在开抢前失效）")
+
+    def _stop_keeper(self, wait: bool = True) -> None:
+        """停止保活，释放浏览器会话与实例锁（浏览器与实例锁都是独占的）。
+
+        本方法**不改动** `_resume_keeper`：是否在一次操作结束后自动恢复保活，
+        由调用方按语义决定——用户退出登录、取消勾选、会话已被官方作废时置 False。
+        """
+        keeper = self.keeper
+        if keeper is None:
+            return
+        self.keeper = None
+        self._keeper_retired.add(keeper)
+        keeper.stop()
+        if wait:
+            keeper.wait(30000)
+        keeper.finished.connect(keeper.deleteLater)
+        self._retired_workers.append(keeper)
+
+    def _on_keeper_finished(self, reason: str) -> None:
+        """保活线程自行结束（主动停止的线程不走这里——它在 _stop_keeper 里已摘除）。"""
+        keeper = self.keeper
+        if keeper is not None:
+            self.keeper = None
+            keeper.finished.connect(keeper.deleteLater)
+            self._retired_workers.append(keeper)
+        if "失效" in reason:
+            # 会话已被官方作废：重启保活没有意义，只会反复弹浏览器窗口。
+            self._resume_keeper = False
+        self.session_label.setText(f"登录状态：{reason}")
+        self.statusBar().showMessage(f"保活结束：{reason}", 15000)
+
     def _login_action(self, action) -> None:
         if action is self.btn_check_login:
             def job(remember):
@@ -719,6 +807,7 @@ class MainWindow(QMainWindow):
                               f"登录状态：{s.state.value}｜{s.message}"),
                           use_remember=True)
         elif action is self.btn_login:
+            self._stop_keeper()
             def job(remember):
                 with create_application(self.data_dir, adapter="browser", remember=True) as app:
                     action_required = app.railway.open_login()
@@ -728,16 +817,31 @@ class MainWindow(QMainWindow):
                         return {"state": status.state.value, "message": f"{status.message} 会话已保存：{path}"}
                     return {"state": status.state.value, "message": status.message}
             self._run_job(job, "等待你在官方窗口完成登录（最长 15 分钟）…",
-                          lambda r: self.session_label.setText(f"登录状态：{r['state']}｜{r['message']}"),
+                          self._on_login_done,
                           use_remember=True)
         elif action is self.btn_logout:
+            # 退出登录后**不要**再自动恢复保活（否则又会拿已清除的会话去访问官方）。
+            self._resume_keeper = False
+            self._stop_keeper()
+            self.keeper_check.setChecked(False)
             def job(remember):
                 with create_application(self.data_dir, adapter="browser", remember=remember) as app:
                     app.railway.clear_saved_session()
                     return "本地会话已清除。"
-            self._run_job(job, "清除会话…", lambda msg: self.session_label.setText(f"登录状态：{msg}"))
+            self._run_job(job, "清除会话…",
+                          lambda msg: self.session_label.setText(f"登录状态：{msg}"))
+
+    def _on_login_done(self, result: dict) -> None:
+        self.session_label.setText(f"登录状态：{result['state']}｜{result['message']}")
+        if result.get("state") == "AUTHENTICATED":
+            # 登录成功后立刻开始保活：之后到抢票之前的等待都由保活维持会话。
+            self._resume_keeper = True
+            self.keeper_check.setChecked(True)
+            self._start_keeper()
 
     def closeEvent(self, event) -> None:
+        self._resume_keeper = False
+        self._stop_keeper()
         if self.worker is not None:
             self.worker.stop()
             self.worker.wait(30000)

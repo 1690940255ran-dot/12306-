@@ -223,6 +223,54 @@ def cli_smoke():
         return {"flow": "doctor/query/create/list/run/show/pause/stop/reject_restart", "run_state": run["status"]}, False
 
 
+def direct_confirm_url():
+    """确认页直达接缝的现状：参数解析与 URL 拼接可用，但**默认关闭**。
+
+    2026-09-24 真机结论：官方"预订"是 POST 表单 + 服务端会话上下文，
+    GET 拼参数直达会被回"系统忙"→ 该优化不成立，默认必须关闭
+    （打开只会白花一次导航）。这里守住"默认关 + 参数解析仍正确"两条。
+    """
+    from railassist.adapters.browser.adapter import BrowserRailwayAdapter
+    from railassist.adapters.browser.left_ticket import build_confirm_url, train_no_of_onclick
+    from railassist.adapters.mock import MockRailwayAdapter
+    from railassist.config import TaskConfig
+    default_off = TaskConfig.from_dict({
+        "from_station": "南京", "to_station": "江都", "dates": ["2026-10-04"]}).order_fastpath is False
+    mock = MockRailwayAdapter()
+    mock.set_hit_script(["C436"])
+    detail = mock.read_hit_detail() or {}
+    params = tuple(detail.get("params") or ())
+    train_no = train_no_of_onclick(str(detail.get("onclick") or ""))
+    built = build_confirm_url(params, "C436", "NJH", "UDH")
+    unsafe = build_confirm_url(("TOKEN&x=1",) + params[1:], "C436", "NJH", "UDH")
+    wrong_segment = build_confirm_url(params, "C436", "NJH", "AOH")
+    detail_ok = (detail.get("train") == "C436" and len(params) >= 5
+                 and train_no == "540000C43600")
+    seam_ok = (hasattr(BrowserRailwayAdapter, "prepare_order_direct")
+               and hasattr(BrowserRailwayAdapter, "read_hit_detail"))
+    ok = (built is not None and unsafe is None and wrong_segment is None
+          and detail_ok and seam_ok and default_off)
+    return {"built_url_ok": built is not None,
+            "unsafe_params_rejected": unsafe is None,
+            "wrong_segment_rejected": wrong_segment is None,
+            "hit_detail_params": len(params),
+            "train_no_from_onclick": train_no,
+            "adapter_has_direct_helpers": seam_ok,
+            "default_off_after_real_rejection": default_off}, not ok
+
+
+def keepalive_interval_headroom():
+    """保活间隔必须明显小于“约 10 分钟无活动即失效”的滑动窗口。"""
+    from railassist.application.keepalive_service import (
+        DEFAULT_INTERVAL_SECONDS, MIN_INTERVAL_SECONDS, LIGHTWEIGHT_VISIT_URL,
+    )
+    ok = (MIN_INTERVAL_SECONDS <= DEFAULT_INTERVAL_SECONDS <= 240
+          and "leftTicket" in LIGHTWEIGHT_VISIT_URL)
+    return {"default_interval": DEFAULT_INTERVAL_SECONDS,
+            "min_interval": MIN_INTERVAL_SECONDS,
+            "visit_page": LIGHTWEIGHT_VISIT_URL}, not ok
+
+
 CASES = [
     ("R01", rush_timing), ("R02", queryable_overrides_sale),
     ("R03", paused_rush), ("R04", auto_disabled_rush),
@@ -230,6 +278,7 @@ CASES = [
     ("R07", delete_pending), ("R08", generic_text), ("R09", sale_date),
     ("R10", scheduling), ("R11", wait_false), ("R12", global_budget),
     ("R13", retry_after), ("R14", half_open), ("R15", logout_method),
+    ("R16", direct_confirm_url), ("R17", keepalive_interval_headroom),
     ("S01", cli_smoke),
 ]
 

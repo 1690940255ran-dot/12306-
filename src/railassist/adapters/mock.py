@@ -27,6 +27,21 @@ RECONCILE_ACTIONS = ("pay", "confirm_paid", "fulfilled", "unfulfilled", "cancel"
 # 确认页演示票价（分），用于模拟“页面金额为权威来源”。
 _DEMO_SEAT_PRICES = {"二等座": 55300, "一等座": 93300, "商务座": 215600}
 
+# 站点电报码：与 MockRailwayAdapter 演示车次（南京→江都）配套。
+# 有了它，抢票的“命中行 token → 确认页直达 URL”在 mock 下也走真实拼接逻辑
+# （真实环境由 StationCatalog 提供同样的 code_for()）。
+_DEMO_TELECODES = {"南京": "NJH", "江都": "UDH", "北京南": "VNP", "上海虹桥": "AOH"}
+
+
+class _MockCatalog:
+    """最小车站目录：只提供 code_for()，与真实 StationCatalog 的调用面一致。"""
+
+    def code_for(self, station: str) -> str:
+        try:
+            return _DEMO_TELECODES[station]
+        except KeyError as exc:
+            raise KeyError(f"演示车站目录中没有 {station}") from exc
+
 
 class MockRailwayAdapter:
     """确定性虚构车次；绝不发起网络请求。支持按查询键编程余票序列与故障脚本。"""
@@ -34,6 +49,7 @@ class MockRailwayAdapter:
     environment = "mock"
 
     def __init__(self):
+        self.catalog = _MockCatalog()
         self._scenarios: dict[str, list[tuple[Ticket, ...]]] = {}
         self._call_count: dict[str, int] = {}
         self._failure_script: list[str] = []
@@ -45,6 +61,13 @@ class MockRailwayAdapter:
         self._queryable = True
         self._prepare_session_loss = 0
         self.keepalive_calls = 0
+        self.direct_hit_token = "MOCKTOKEN0123456789%2F%2B%3D%3D"  # 空串 = 命中行不带预订 token
+        self.fail_direct_url = False                   # True = 直达确认页失败（验证回退）
+        self.direct_urls: list[str] = []               # 直达成功用过的 URL
+        self.direct_attempts: list[str] = []           # 直达尝试过的 URL（含失败）
+        self.two_step_urls: list[tuple] = []           # 两步 POST 成功的命中原参数
+        self.two_step_attempts: list[tuple] = []       # 两步 POST 尝试（含失败）
+        self.fail_two_step = False                     # True = 两步 POST 被拒（验证回退）
         self._orders: dict[str, dict] = {}  # remote_ref -> 模拟订单状态
         self._goal_refs: dict[str, str] = {}  # goal_id -> remote_ref（模拟官方订单列表）
 
@@ -141,6 +164,23 @@ class MockRailwayAdapter:
     def read_hit(self) -> str | None:
         return self._hit_script.pop(0) if self._hit_script else None
 
+    def read_hit_detail(self) -> dict | None:
+        """命中明细：车次 + 该行“预订”onclick 参数（空 token 时参数留空）。
+
+        参数结构照抄官方：`token, 开车时刻(HH:MM), 内部车次号, 出发电报码, 到达电报码, …`。
+        内部车次号也照官方形态（如 540000C43600）——显示车次号是它的子串。
+        """
+        train = self.read_hit()
+        if not train:
+            return None
+        if not self.direct_hit_token:
+            return {"train": train, "params": (), "onclick": "", "train_no": None}
+        train_no = f"540000{train}00"
+        params = (self.direct_hit_token, "08:00", train_no, "NJH", "UDH", "",
+                  "O0090M0090W0090", "NJH", "QOU")
+        onclick = "'" + "','".join(params) + "'"
+        return {"train": train, "params": params, "onclick": onclick, "train_no": train_no}
+
     def set_hit_script(self, actions: list[str]) -> None:
         """抢票轮询脚本：每次 read_hit 弹出一个（空串=未命中，车次=命中）。"""
         self._hit_script = list(actions)
@@ -173,6 +213,32 @@ class MockRailwayAdapter:
         return self.session_status()
 
     def prepare_order_from_current_page(self, intent: BookingIntent) -> PreparedOrder:
+        return self.prepare_order(intent)
+
+    def prepare_order_two_step(self, intent: BookingIntent,
+                               params: tuple[str, ...]) -> PreparedOrder:
+        """模拟“两步 POST 直达确认页”；fail_two_step=True 时模拟被官方拒绝。"""
+        self.two_step_attempts.append(params)
+        if self.fail_two_step:
+            raise RailAssistError("模拟：两步下单未到达确认订单页（上下文被拒）")
+        if len(params) < 7:
+            raise RailAssistError("模拟：两步下单参数不完整；将回退点击路径。")
+        self.two_step_urls.append(params[0])
+        return self.prepare_order(intent)
+
+    def prepare_order_direct(self, intent: BookingIntent, url: str) -> PreparedOrder:
+        """模拟“命中后直达确认页”；fail_direct_url=True 时模拟直达失败以验证回退。
+
+        失败文案刻意与浏览器适配器一致（“未到达确认订单页”），
+        这样 booking 侧才会按“直达这一步没走通”回退到点击路径——
+        回退判据必须测到真实分支，不能靠一条自定义文案绕过。
+        """
+        self.direct_attempts.append(url)
+        if self.fail_direct_url:
+            raise RailAssistError("模拟：确认页直达未到达确认订单页（token 失效）")
+        if "confirmPassenger" not in url or "leftTicket=" not in url:
+            raise RailAssistError("模拟：确认页直达未到达确认订单页（URL 结构不符）")
+        self.direct_urls.append(url)
         return self.prepare_order(intent)
 
     def open_login(self) -> UserActionRequired:

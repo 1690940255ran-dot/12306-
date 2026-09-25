@@ -8,6 +8,14 @@
    起售前 rush_lead_seconds（默认 5 分钟）打开结果页占位，
    起售前 30 秒进入快速轮询（点页面自身“查询”按钮，间隔 rush_interval_seconds）。
 4. 官方刷新出票瞬间自动下单：预检（授权/登录）→ 确认页核对 → 金额复检 → 单次提交。
+
+速度（2026-09-24 真机结论）：
+- 原设想的"命中瞬间用结果行 token 直达确认页"**已被真机否决**（官方是 POST 表单 +
+  服务端会话上下文，GET 拼参数会被回"系统忙"），因此 `order_fastpath` 默认关闭；
+- 保留的加速项是"我们自己的固定等待"压缩（乘客区按元素就绪轮询、票种/席别
+  300→120ms、弹窗 800→300ms、提交后轮询 400→150ms）；
+- 真实可用的下单路径（重新导航 + 点预订）实测到确认页 **1.4~5.2 秒**，波动很大，
+  到点抢票时只会更慢。见 docs/2026-09-24-真机验证-直达路径不成立.md。
 """
 from datetime import datetime, timedelta, timezone
 import time
@@ -74,7 +82,14 @@ class RushService:
             self.sleep(min(remaining, 5.0))
 
     def _place_order(self, config, task_id, date, hit, passengers):
-        """执行一次下单（含“会话失效后扫码重试一次”的恢复）。返回 (结果, 预检完成时刻)。"""
+        """执行一次下单（含“会话失效后扫码重试一次”的恢复）。返回 (结果, 预检完成时刻)。
+
+        hit 为命中明细：{"train": 车次, "params": 该行“预订”onclick 参数}；
+        参数齐全时走**直达确认页**（省掉重新加载结果页的那一步），
+        否则回退到“重新导航 + 点预订”。两条路径的核对与提交完全一致。
+        """
+        train = hit["train"] if isinstance(hit, dict) else hit
+        params = tuple(hit.get("params") or ()) if isinstance(hit, dict) else ()
         settle = float(getattr(config, "post_hit_settle_seconds", 0) or 0)
         if settle > 0:
             # 命中瞬间表格刚重渲染，页面观察器可能在 DOM 更新中途就置位；
@@ -86,24 +101,56 @@ class RushService:
         except Exception as exc:
             alive = f"校验失败({type(exc).__name__})"
         self.on_status(f"点“预订”前会话校验：{alive}")
-        match = {"date": date, "train_code": hit, "seat": config.seat_priority[0],
+        match = {"date": date, "train_code": train, "seat": config.seat_priority[0],
                  "count": config.passenger_count, "total_amount_fen": 0}
+        use_current_page = bool(getattr(config, "order_reuse_page", False))
+        direct_url = None
+        two_step = bool(getattr(config, "order_two_step", False))
+        if not use_current_page and bool(getattr(config, "order_fastpath", True)):
+            direct_url = self._direct_confirm_url(config, train, params)
         # 下单单据：默认**重新导航**（不复用预热页面）。
         # 2026-09-23 17:00 现场（同一次运行、同一会话、同一趟车 C3782）：
         #   复用预热页面 → 点“预订”失败且会话被作废；全新导航 → 成功打开确认页。
-        # 但全新导航要多花约 5 秒（确认页核对 7.86s vs 复用页面 2.39s），
-        # 且 17:00 那次失败也可能是**会话过老**（当天会话已 4h50m）所致，
-        # 故提供 order_reuse_page 开关用于 A/B 复验，以决定能否拿回这 5 秒。
+        # 2026-09-24 真机：官方“预订”链路是 submitOrderRequest → initDc（POST），
+        # 因此 order_two_step 打开时按这两步复刻，省掉第二次整页加载；
+        # 失败仍然回退到“重新导航 + 点预订”。
         attempt = self.booking.precheck_and_prepare(
             task_id, match, passengers, action="order",
             automatic=bool(config.auto_submit), session_prevalidated=True,
-            use_current_page=bool(getattr(config, "order_reuse_page", False)))
+            use_current_page=use_current_page,
+            direct_navigation=bool(direct_url or two_step))
         prepared_at = self.wall_clock()
-        result = self.booking.submit(attempt["id"], dry_run=config.dry_run)
+        result = self.booking.submit(attempt["id"], dry_run=config.dry_run,
+                                     direct_url=direct_url,
+                                     two_step_params=params if two_step else None)
         if not self._needs_session_retry(config, result):
             return result, prepared_at
         retry = self._relogin_and_retry(config, task_id, match, passengers, result["id"])
         return (retry, prepared_at) if retry is not None else (result, prepared_at)
+
+    def _direct_confirm_url(self, config, train: str, params: tuple[str, ...]) -> str | None:
+        """由命中行的“预订”参数拼确认页 URL；任一环不确定就返回 None（走点击路径）。
+
+        车次号用显示车次号做一致性校验（官方内部车次号里含它），区间用本站电报码校验；
+        三方一致才拼 URL——这是纯优化，任何不确定都必须退回点击路径。
+        """
+        if not params:
+            return None
+        catalog = getattr(self.railway, "catalog", None)
+        if catalog is None:
+            return None
+        from railassist.adapters.browser.left_ticket import build_confirm_url
+        try:
+            from_code = catalog.code_for(config.from_station)
+            to_code = catalog.code_for(config.to_station)
+        except Exception:
+            return None
+        # 用显示车次号做校验（内部车次号里含它）；onclick 原文由适配器缓存的命中行提供，
+        # 这里不再单独解析，避免把两个来源的车次号混用。
+        url = build_confirm_url(params, train, from_code, to_code)
+        if url is None:
+            self.on_status("命中行参数无法安全拼出确认页直达链接；改用“重新导航 + 点预订”。")
+        return url
 
     def _needs_session_retry(self, config, result) -> bool:
         """命中后失败是否值得“扫码重试一次”。
@@ -305,21 +352,33 @@ class RushService:
                 self.on_status("超过停止时间，结束抢票。")
                 return {"outcome": "no_ticket"}
             self.railway.refresh_results()
-            # 官方刷新渲染的瞬间观察器即置位；以细粒度读取，命中立即下单
+            # 官方刷新渲染的瞬间观察器即置位；以细粒度读取，命中立即下单。
+            # 只有开启 order_fastpath / order_two_step 时才顺带回读“预订”参数
+            # （两步 POST 需要 secretStr 与 seat_discount_info）；否则热循环保持最轻。
+            need_params = (bool(getattr(config, "order_fastpath", False))
+                           or bool(getattr(config, "order_two_step", False)))
+            detail_reader = (getattr(self.railway, "read_hit_detail", None)
+                             if need_params else None)
             window_end = now + interval
             hit = None
             while not self.should_stop() and self.wall_clock() < window_end:
-                hit = self.railway.read_hit()
-                if hit:
+                if callable(detail_reader):
+                    detail = detail_reader()
+                else:
+                    train = self.railway.read_hit()
+                    detail = {"train": train, "params": ()} if train else None
+                if detail:
+                    hit = detail
                     break
                 self.sleep(HIT_READ_INTERVAL)
             if hit:
                 hit_at = self.wall_clock()
+                train = hit["train"]
                 if config.dry_run:
-                    self.on_status(f"命中 {hit} {config.seat_priority[0]}！开始演练"
+                    self.on_status(f"命中 {train} {config.seat_priority[0]}！开始演练"
                                    "（走到官方确认页核对为止，不提交、不产生订单）…")
                 else:
-                    self.on_status(f"命中 {hit} {config.seat_priority[0]}！开始下单…")
+                    self.on_status(f"命中 {train} {config.seat_priority[0]}！开始下单…")
                 result, prepared_at = self._place_order(config, task_id, date, hit, passengers)
                 done_at = self.wall_clock()
                 self.on_status(
@@ -328,7 +387,7 @@ class RushService:
                     f"确认页{'核对' if config.dry_run else '+提交'} "
                     f"{(done_at - prepared_at).total_seconds():.2f}s，"
                     f"命中到结果合计 {(done_at - hit_at).total_seconds():.2f}s")
-                return {"outcome": result["status"], "train": hit,
+                return {"outcome": result["status"], "train": train,
                         "attempt_id": result["id"], "dry_run": config.dry_run,
                         "message": result["payload"].get("message", "")}
         return {"outcome": "stopped"}

@@ -73,6 +73,57 @@ class ConfirmOrderPage:
 
     # ---------- 打开 ----------
 
+    def open_direct(self, url: str, timeout_ms: int = 20000) -> None:
+        """直接用结果行 token 拼出的确认页 URL 导航（省掉一次结果页加载）。
+
+        2026-09-23 定位的结论仍然成立：**不能复用放票前加载的预热页面**。
+        这里用的是**命中瞬间从该车次行取到的新 token**，官方 JS 点“预订”
+        跳转的就是同一个 URL，因此等价于“重新导航”，只是少了一次整页加载。
+        任何异常都抛出，由调用方回退到“重新导航 + 点击预订”的稳妥路径。
+        """
+        page = self.page
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        except Exception as exc:
+            raise RailAssistError(f"确认页直达导航失败（{type(exc).__name__}）；将回退点击路径。") from exc
+        if "confirmPassenger" not in page.url:
+            try:
+                body = page.evaluate(
+                    "() => (document.body ? document.body.innerText : '') || ''")
+                snippet = " ".join(body.split())[:120]
+            except Exception as exc:  # noqa: BLE001 - 诊断失败不应掩盖主错误
+                snippet = f"(页面文本读取失败 {type(exc).__name__})"
+            raise RailAssistError(
+                "确认页直达未到达确认订单页；将回退点击路径。"
+                f"｜诊断：URL={str(page.url)[:140]}；页面摘录={snippet}")
+        self.wait_ready(timeout_ms=6000)
+
+    def wait_ready(self, timeout_ms: int = 20000) -> None:
+        """等待确认页可交互（提交按钮可见）；超时由后续核对报错兜底。"""
+        try:
+            self.page.wait_for_selector("#submitOrder_id", state="visible", timeout=timeout_ms)
+        except Exception:
+            pass
+
+    def wait_passenger_row(self, name: str, timeout_ms: int = 3000) -> bool:
+        """等首位乘车人的票种行渲染出来（确认页乘客区是异步渲染的）。
+
+        命中瞬间每一毫秒都在和余票赛跑：这里按元素就绪轮询，
+        比固定等待页面渲染完要快得多，同时仍然等到真正可交互为止。
+        """
+        script = """(target) => {
+            const labels = Array.from(document.querySelectorAll('#normal_passenger_id label'))
+                .map(l => (l.innerText || '').trim());
+            const hit = labels.some(t => t === target
+                || t.split('（')[0].split('(')[0].trim() === target);
+            return hit && !!document.querySelector('#ticketType_1');
+        }"""
+        try:
+            self.page.wait_for_function(script, arg=name, timeout=timeout_ms, polling=50)
+            return True
+        except Exception:
+            return False
+
     def open_from_results(self, train_code: str, timeout_ms: int = 45000,
                           from_code: str | None = None, to_code: str | None = None) -> None:
         """在已加载的官方余票页上点击目标车次的“预订”，等待确认页出现。
@@ -185,7 +236,10 @@ class ConfirmOrderPage:
         if chosen is None:
             raise RailAssistError(f"票种选项中没有“{ticket_type}”：{options}")
         select.select_option(label=chosen)
-        page.wait_for_timeout(300)
+        # 票种变化会重新生成席别下拉；这里只需要让官方 JS 跑完一次重渲染。
+        # 固定等待从 300ms 收到 120ms，后续 select_seat/提交前的 handle_popups
+        # 仍会校验真实控件状态，不会把“没渲染完”当成成功。
+        page.wait_for_timeout(120)
 
     def select_seat(self, seat: str, index: int = 1) -> int:
         """选择席别并返回该席别单价（分）；价格读不到时报错（不猜测）。"""
@@ -202,7 +256,9 @@ class ConfirmOrderPage:
         if chosen is None:
             raise RailAssistError(f"确认页席别选项中没有“{seat}”：{options}")
         select.select_option(label=chosen)
-        page.wait_for_timeout(300)
+        # 席别切换后官方 JS 需要重算票价/座位；等待由 300ms 收到 120ms，
+        # 票价直接从选项文本解析（不依赖渲染），提交前还会复检页面状态。
+        page.wait_for_timeout(120)
         price = parse_price_fen(chosen)
         if price is None:
             raise RailAssistError(f"席别选项文本中未解析到票价：{chosen}")
@@ -238,7 +294,9 @@ class ConfirmOrderPage:
                 except Exception:
                     continue
                 if result:
-                    self.page.wait_for_timeout(800)
+                    # 弹窗关闭动画：800ms → 300ms。下一轮 cycles 会再确认弹窗确实消失，
+                    # 因此缩短等待不会漏掉仍在的遮罩。
+                    self.page.wait_for_timeout(300)
                     handled = hit = True
             if not hit:
                 break
@@ -305,7 +363,9 @@ class ConfirmOrderPage:
                 break
             if set(after_text.split()) - baseline:
                 break
-            page.wait_for_timeout(400)
+            # 结果轮询粒度 400ms → 150ms：命中后页面文本一变就能立刻分类返回，
+            # 不再白等一个较粗的轮询周期（总超时仍为 timeout_ms）。
+            page.wait_for_timeout(150)
         if url_after != url_before:
             return classify_submit_text(after_text)
         new_words = set(after_text.split()) - baseline

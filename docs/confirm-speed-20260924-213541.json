@@ -1,0 +1,94 @@
+{
+  "started_at": "2026-09-24T21:32:45",
+  "args": {
+    "from_station": "江都",
+    "to_station": "南京",
+    "date": "2026-10-08",
+    "train": "C3856",
+    "runs": 2,
+    "warmup_minutes": 0.0,
+    "data_dir": ".runtime\\prod",
+    "json_out": null
+  },
+  "records": [
+    {
+      "path": "direct_raw",
+      "ok": false,
+      "ms": null,
+      "note": "直达后确认页未就绪或车次不符（真实环境会回退点击）",
+      "run": 1
+    },
+    {
+      "path": "direct_reencoded",
+      "ok": false,
+      "ms": null,
+      "note": "直达后确认页未就绪或车次不符（真实环境会回退点击）",
+      "run": 1
+    },
+    {
+      "path": "click",
+      "ok": true,
+      "ms": 5219.000000000051,
+      "note": "",
+      "run": 1
+    },
+    {
+      "path": "direct_raw",
+      "ok": false,
+      "ms": null,
+      "note": "直达后确认页未就绪或车次不符（真实环境会回退点击）",
+      "run": 1
+    },
+    {
+      "path": "direct_raw",
+      "ok": false,
+      "ms": null,
+      "note": "直达后确认页未就绪或车次不符（真实环境会回退点击）",
+      "run": 2
+    },
+    {
+      "path": "direct_reencoded",
+      "ok": false,
+      "ms": null,
+      "note": "直达后确认页未就绪或车次不符（真实环境会回退点击）",
+      "run": 2
+    },
+    {
+      "path": "click",
+      "ok": true,
+      "ms": 2922.0000000000255,
+      "note": "",
+      "run": 2
+    },
+    {
+      "path": "direct_raw",
+      "ok": false,
+      "ms": null,
+      "note": "直达后确认页未就绪或车次不符（真实环境会回退点击）",
+      "run": 2
+    }
+  ],
+  "warmup": [],
+  "summary": {
+    "direct_raw": {
+      "runs_ok": 0,
+      "median_ms": null,
+      "min_ms": null,
+      "max_ms": null
+    },
+    "direct_reencoded": {
+      "runs_ok": 0,
+      "median_ms": null,
+      "min_ms": null,
+      "max_ms": null
+    },
+    "click": {
+      "runs_ok": 2,
+      "median_ms": 4071,
+      "min_ms": 2922,
+      "max_ms": 5219
+    },
+    "saved_by_direct_raw_ms": null,
+    "saved_by_direct_reencoded_ms": null
+  }
+}

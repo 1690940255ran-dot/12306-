@@ -26,7 +26,7 @@ class FakeClock:
 
 class RushHarness:
     def __init__(self, sale_at: datetime, start: datetime, queryable: bool = True,
-                 dry_run: bool = False, settle: float = 0.0):
+                 dry_run: bool = False, settle: float = 0.0, extra: dict | None = None):
         self.tmp = tempfile.TemporaryDirectory()
         self.repo = SQLiteTaskRepository(Path(self.tmp.name) / "app.db")
         self.addCleanup = self.tmp.cleanup
@@ -36,15 +36,16 @@ class RushHarness:
         self.booking = BookingService(self.repo, self.adapter, self.outbox)
         self.wall = FakeClock(start)
         self.sale_at = sale_at
-        data = TaskConfig.from_dict({
+        data = {
             "from_station": "南京", "to_station": "江都", "dates": ["2026-10-04"],
             "train_codes": ["C436"], "seat_priority": ["二等座"],
             "passenger_refs": ["陈健"], "auto_submit": True,
             "rush_mode": True, "rush_interval_seconds": 3, "rush_lead_seconds": 300,
             "sale_at": sale_at.isoformat(), "dry_run": dry_run,
             "post_hit_settle_seconds": settle,
-        }).to_dict()
-        self.task_id = self.repo.create(data).id
+        }
+        data.update(extra or {})
+        self.task_id = self.repo.create(TaskConfig.from_dict(data).to_dict()).id
         self.repo.update(self.task_id, TaskStatus.MONITORING)
         self.booking.authorize(self.task_id, actions=("order",), passenger_refs=("陈健",),
                                candidate_scope={"dates": ["2026-10-04"],
@@ -189,7 +190,7 @@ class RushServiceTests(unittest.TestCase):
         h = RushHarness(sale_at=start + timedelta(seconds=10), start=start)
         self.addCleanup(h.close)
         h.adapter.set_hit_script(["C436"])
-        h.adapter.set_prepare_session_loss(1)   # 第一次打开确认页失败（会话失效）
+        h.adapter.set_prepare_session_loss(1)   # 首次打开确认页失败（会话在开抢前失效）
         result = h.service.run(h.task_id)
         self.assertEqual(result["outcome"], "PENDING_PAYMENT")
         self.assertTrue(any("重试" in s for s in h.statuses))
@@ -216,6 +217,98 @@ class RushServiceTests(unittest.TestCase):
         attempt = h.repo.list_attempts()[0]
         self.assertFalse(attempt["payload"].get("use_current_page"))
 
+    def test_hit_uses_direct_confirm_page_when_token_available(self):
+        """显式打开 order_fastpath 时：命中行带 token → 直接跳确认页（尝试路径）。"""
+        start = datetime(2026, 9, 19, 20, 0, 0, tzinfo=CST)
+        h = RushHarness(sale_at=start + timedelta(seconds=10), start=start,
+                        extra={"order_fastpath": True})
+        self.addCleanup(h.close)
+        h.adapter.set_hit_script(["C436"])
+        result = h.service.run(h.task_id)
+        self.assertEqual(result["outcome"], "PENDING_PAYMENT")
+        self.assertEqual(len(h.adapter.direct_urls), 1)
+        url = h.adapter.direct_urls[0]
+        self.assertIn("/otn/confirmPassenger/initDc?", url)
+        self.assertIn("stationTrainCode=C436", url)
+        self.assertIn("leftTicket=" + h.adapter.direct_hit_token, url)
+        self.assertIn("fromStationTelecode=NJH", url)
+        attempt = h.repo.list_attempts()[0]
+        self.assertTrue(attempt["payload"].get("direct_navigation"))
+        self.assertNotIn("direct_navigation_error", attempt["payload"])
+
+    def test_direct_confirm_page_failure_falls_back_to_click_path(self):
+        """直达失败（真机就是这个结果）必须自动回退到重新导航，不丢单。"""
+        start = datetime(2026, 9, 19, 20, 0, 0, tzinfo=CST)
+        h = RushHarness(sale_at=start + timedelta(seconds=10), start=start,
+                        extra={"order_fastpath": True})
+        self.addCleanup(h.close)
+        h.adapter.set_hit_script(["C436"])
+        h.adapter.fail_direct_url = True
+        result = h.service.run(h.task_id)
+        # 回退后仍然走完点击路径 → 正常下单
+        self.assertEqual(result["outcome"], "PENDING_PAYMENT")
+        self.assertEqual(len(h.adapter.direct_attempts), 1)   # 尝试过直达
+        self.assertEqual(h.adapter.direct_urls, [])           # 但直达未成功
+        attempt = h.repo.list_attempts()[0]
+        self.assertEqual(attempt["status"], "PENDING_PAYMENT")
+        self.assertTrue(attempt["payload"].get("match"))      # 意图完整保留
+
+    def test_direct_confirm_page_can_be_disabled(self):
+        """order_fastpath=False（**现在的默认值**）时完全不尝试直达。"""
+        start = datetime(2026, 9, 19, 20, 0, 0, tzinfo=CST)
+        h = RushHarness(sale_at=start + timedelta(seconds=10), start=start,
+                        extra={"order_fastpath": False})
+        self.addCleanup(h.close)
+        h.adapter.set_hit_script(["C436"])
+        result = h.service.run(h.task_id)
+        self.assertEqual(result["outcome"], "PENDING_PAYMENT")
+        self.assertEqual(h.adapter.direct_attempts, [])
+        self.assertEqual(h.adapter.direct_urls, [])
+
+    def test_direct_confirm_page_off_by_default(self):
+        """默认配置下不尝试直达（真机否决后必须默认关闭，否则每次白花一次导航）。"""
+        start = datetime(2026, 9, 19, 20, 0, 0, tzinfo=CST)
+        h = RushHarness(sale_at=start + timedelta(seconds=10), start=start)
+        self.addCleanup(h.close)
+        h.adapter.set_hit_script(["C436"])
+        self.assertFalse(h.repo.get(h.task_id).config["order_fastpath"])
+        self.assertFalse(h.repo.get(h.task_id).config["order_two_step"])
+        result = h.service.run(h.task_id)
+        self.assertEqual(result["outcome"], "PENDING_PAYMENT")
+        self.assertEqual(h.adapter.direct_attempts, [])
+        self.assertEqual(h.adapter.two_step_attempts, [])
+
+    def test_two_step_used_when_enabled(self):
+        """开启 order_two_step：命中后用官方同款两步 POST 进确认页（少一次整页加载）。"""
+        start = datetime(2026, 9, 19, 20, 0, 0, tzinfo=CST)
+        h = RushHarness(sale_at=start + timedelta(seconds=10), start=start,
+                        extra={"order_two_step": True})
+        self.addCleanup(h.close)
+        h.adapter.set_hit_script(["C436"])
+        result = h.service.run(h.task_id)
+        self.assertEqual(result["outcome"], "PENDING_PAYMENT")
+        self.assertEqual(len(h.adapter.two_step_attempts), 1)
+        params = h.adapter.two_step_attempts[0]
+        self.assertGreaterEqual(len(params), 7)            # token…seat_discount_info
+        self.assertEqual(params[2], "540000C43600")        # 内部车次号
+        self.assertEqual(h.adapter.direct_urls, [])        # 未走 GET 直达
+        attempt = h.repo.list_attempts()[0]
+        self.assertTrue(attempt["payload"].get("direct_navigation"))
+
+    def test_two_step_failure_falls_back_to_click_path(self):
+        """两步 POST 被官方拒（真机可能的结局）→ 自动回退重新导航，不丢单。"""
+        start = datetime(2026, 9, 19, 20, 0, 0, tzinfo=CST)
+        h = RushHarness(sale_at=start + timedelta(seconds=10), start=start,
+                        extra={"order_two_step": True})
+        self.addCleanup(h.close)
+        h.adapter.set_hit_script(["C436"])
+        h.adapter.fail_two_step = True
+        result = h.service.run(h.task_id)
+        self.assertEqual(result["outcome"], "PENDING_PAYMENT")
+        self.assertEqual(len(h.adapter.two_step_attempts), 1)
+        self.assertEqual(h.adapter.two_step_urls, [])
+        self.assertEqual(h.repo.list_attempts()[0]["status"], "PENDING_PAYMENT")
+
     def test_dry_run_prepare_failure_reports_reason_not_crash(self):
         """演练模式下确认页失败：必须以 CANCELLED 结束并保留原因。
 
@@ -226,7 +319,7 @@ class RushServiceTests(unittest.TestCase):
         h = RushHarness(sale_at=start + timedelta(seconds=10), start=start, dry_run=True)
         self.addCleanup(h.close)
         h.adapter.set_hit_script(["C436"])
-        h.adapter.set_prepare_session_loss(1)   # 确认页打不开
+        h.adapter.set_prepare_session_loss(2)   # 直达与回退两次都失败（模拟会话在开抢前失效）
         result = h.service.run(h.task_id)
         self.assertEqual(result["outcome"], "CANCELLED")
         attempt = h.repo.list_attempts()[0]

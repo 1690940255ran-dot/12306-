@@ -79,6 +79,16 @@ class ConfigValidationTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             TaskConfig.from_dict(["not", "a", "dict"])
 
+    def test_fastpath_default_off_after_real_machine_rejection(self):
+        """确认页直达默认**关闭**：真机实测官方是 POST 表单+服务端上下文，
+        GET 拼参数直达会被回"系统忙"，打开只会白花一次导航。"""
+        self.assertFalse(TaskConfig.from_dict(base_config()).order_fastpath)
+        self.assertTrue(TaskConfig.from_dict(base_config(order_fastpath=True)).order_fastpath)
+
+    def test_fastpath_must_be_boolean(self):
+        with self.assertRaises(ConfigError):
+            TaskConfig.from_dict(base_config(order_fastpath="yes"))
+
 
 if __name__ == "__main__":
     unittest.main()

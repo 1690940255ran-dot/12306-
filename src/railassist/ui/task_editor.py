@@ -17,6 +17,23 @@ def _split(value: str) -> list[str]:
     return [item.strip() for item in value.replace("，", ",").split(",") if item.strip()]
 
 
+def _qt_datetime(value: str) -> QDateTime:
+    """ISO 8601（含时区偏移）→ QDateTime（本地时间显示）。
+
+    2026-09-24 修复：原先用 `QDateTime.fromISOFormat`，本机 PySide6 并没有这个
+    类方法，导致**编辑任何带“开售时间/起止时间”的任务时对话框直接抛异常**
+    （AttributeError），任务改不了。改用 Qt 自带的 ISO 解析（带毫秒分支兜底），
+    解析后再转到本地时区，保证 17:00 就是本地 17:00。
+    """
+    stamp = str(value).strip()
+    parsed = QDateTime.fromString(stamp, Qt.DateFormat.ISODateWithMs)
+    if not parsed.isValid():
+        parsed = QDateTime.fromString(stamp, Qt.DateFormat.ISODate)
+    if not parsed.isValid():
+        parsed = QDateTime.fromString(stamp, "yyyy-MM-ddTHH:mm:ss")
+    return parsed.toLocalTime() if parsed.isValid() else QDateTime.currentDateTime()
+
+
 class TaskEditorDialog(QDialog):
     """新建/复制任务。返回 TaskConfig 或 None。"""
 
@@ -90,9 +107,9 @@ class TaskEditorDialog(QDialog):
         self.stop_at.setEnabled(source.stop_at is not None)
         self.stop_check.setChecked(source.stop_at is not None)
         if source.start_at:
-            self.start_at.setDateTime(QDateTime.fromISOFormat(source.start_at))
+            self.start_at.setDateTime(_qt_datetime(source.start_at))
         if source.stop_at:
-            self.stop_at.setDateTime(QDateTime.fromISOFormat(source.stop_at))
+            self.stop_at.setDateTime(_qt_datetime(source.stop_at))
 
         self.auto_submit = QCheckBox("条件完全匹配时自动提交一次订单（不含自动支付；还需登记授权）")
         self.auto_submit.setChecked(source.auto_submit)
@@ -115,7 +132,23 @@ class TaskEditorDialog(QDialog):
         self.sale_at_edit.setEnabled(source.sale_at is not None)
         self.sale_at_check.toggled.connect(self.sale_at_edit.setEnabled)
         if source.sale_at:
-            self.sale_at_edit.setDateTime(QDateTime.fromISOFormat(source.sale_at))
+            self.sale_at_edit.setDateTime(_qt_datetime(source.sale_at))
+
+        self.fastpath_check = QCheckBox(
+            "命中后直达确认页（默认关；2026-09-24 真机实测不成立，仅供复验）")
+        self.fastpath_check.setChecked(source.order_fastpath)
+        self.reuse_page_check = QCheckBox(
+            "复用预热页面下单（不推荐：放票前的预订凭证已失效，仅用于复验）")
+        self.reuse_page_check.setChecked(source.order_reuse_page)
+        # 两步 POST（submitOrderRequest → initDc）是实验开关，暂不上界面；
+        # 但必须**原样带过去**，否则用 GUI 编辑任务会把它静默重置回 False。
+        self._two_step_value = bool(source.order_two_step)
+        self.settle_spin = QDoubleSpinBox()
+        self.settle_spin.setRange(0, 10)
+        self.settle_spin.setDecimals(1)
+        self.settle_spin.setSingleStep(0.5)
+        self.settle_spin.setSuffix(" 秒")
+        self.settle_spin.setValue(float(source.post_hit_settle_seconds))
 
         form = QFormLayout()
         form.addRow("出发站*", self.from_edit)
@@ -146,6 +179,9 @@ class TaskEditorDialog(QDialog):
         form.addRow("抢票轮询间隔", self.rush_interval)
         form.addRow("提前开页", self.rush_lead)
         form.addRow(self.sale_at_check, self.sale_at_edit)
+        form.addRow("", self.fastpath_check)
+        form.addRow("", self.reuse_page_check)
+        form.addRow("命中后稳定等待", self.settle_spin)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -201,6 +237,12 @@ class TaskEditorDialog(QDialog):
             "rush_mode": self.rush_mode.isChecked(),
             "rush_interval_seconds": self.rush_interval.value(),
             "rush_lead_seconds": self.rush_lead.value(),
+            # 这三个开关直接决定下单快慢与走哪条路径，必须随表单保存，
+            # 否则每次“编辑任务”都会把它们静默重置回默认值。
+            "order_fastpath": self.fastpath_check.isChecked(),
+            "order_reuse_page": self.reuse_page_check.isChecked(),
+            "order_two_step": self._two_step_value,
+            "post_hit_settle_seconds": float(self.settle_spin.value()),
         }
         if self.sale_at_check.isChecked():
             qdt = self.sale_at_edit.dateTime()

@@ -2,14 +2,19 @@
 
 - 一次性任务（登录检查、下单等）在独立线程内创建 Application（含实例锁）。
 - 监控线程独占实例锁；监控期间其他引擎操作会被拒绝（单实例约束）。
+- 保活线程持有浏览器会话持续续期；抢票线程启动前必须先停掉它（浏览器单实例）。
 - 浏览器对象只在创建它的线程内使用；结果通过 Qt 信号回传。
 """
 import json
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
 from railassist.bootstrap import create_application
+
+# 保活间隔：略小于抢票内部的 KEEPALIVE_INTERVAL（180 秒），保持会话始终新鲜。
+KEEPER_INTERVAL_SECONDS = 150
 
 
 class JobThread(QThread):
@@ -82,6 +87,75 @@ class MonitorWorker(QThread):
                 self.finished_run.emit("已停止" if self._stop else "没有活动任务")
         except Exception as exc:
             self.finished_run.emit(f"监控异常：{exc}")
+
+
+class SessionKeeperWorker(QThread):
+    """登录保活线程：**在等待抢票期间**持续续期会话（修复“提前一小时打开又要重新扫码”）。
+
+    现场问题（2026-09-24 反馈）：GUI 的登录操作跑完就退出，进程关闭后没有任何东西
+    维持会话；12306 会话是**闲置滑动过期**（约 10 分钟无活动即失效），
+    于是"提前一小时打开 → 等到抢票时已被登出 → 又要扫码"。
+
+    本线程持有浏览器会话，周期调用 KeepAliveService（checkUser 续期 + 官方页面
+    轻量访问 + 重新加密落盘），直到：
+      - 用户点击"开始抢票"（主窗口会先停掉本线程，把浏览器让给抢票线程）；
+      - 用户取消勾选/停止保活；
+      - 检测到会话已失效（此时只能本人扫码，保活已无意义，明确提示并结束）。
+    """
+
+    status = Signal(str)
+    finished_run = Signal(str)
+
+    def __init__(self, data_dir: Path, interval_seconds: int = KEEPER_INTERVAL_SECONDS,
+                 parent=None):
+        super().__init__(parent)
+        self.data_dir = data_dir
+        self.interval_seconds = interval_seconds
+        self._stop = False
+        self._event = threading.Event()
+
+    def stop(self) -> None:
+        self._stop = True
+        self._event.set()
+
+    def _sleep_interruptible(self, seconds: float) -> None:
+        self._event.wait(timeout=max(0.0, seconds))
+
+    def run(self) -> None:
+        from railassist.application.keepalive_service import KeepAliveService
+        try:
+            with create_application(self.data_dir, adapter="browser", remember=True) as app:
+                if self._stop:
+                    self.finished_run.emit("保活已取消")
+                    return
+                # 先确认会话仍然有效：无效说明已被强制下线，保活无意义，
+                # 明确提示本人扫码，不静默空转。
+                status = app.railway.session_status()
+                if status.state.value != "AUTHENTICATED":
+                    self.finished_run.emit(
+                        f"登录态已失效（{status.state.value}）——需要本人重新扫码登录；"
+                        "保活已停止。")
+                    return
+                service = KeepAliveService(
+                    app.railway, app.railway.session,
+                    interval_seconds=self.interval_seconds,
+                    sleep=self._sleep_interruptible,
+                    should_stop=lambda: self._stop,
+                    on_status=lambda message: self.status.emit(message),
+                )
+                self.status.emit(
+                    f"登录保活已启动：每 {service.interval_seconds} 秒续期一次"
+                    "（含一次官方页面访问）；点“开始抢票”时会自动让位给抢票。")
+                while not self._stop:
+                    ok = service.tick()
+                    if not ok:
+                        break
+                    self._sleep_interruptible(self.interval_seconds)
+                service.close()
+                self.finished_run.emit("保活已停止" if self._stop
+                                       else "下单登录态已失效——请重新扫码登录后再启动抢票。")
+        except Exception as exc:  # 线程兜底：把错误带回 UI
+            self.finished_run.emit(f"保活异常：{exc}")
 
 
 class RushWorker(QThread):

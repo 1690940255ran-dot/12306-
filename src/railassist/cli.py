@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from railassist import __version__
+from railassist.application.keepalive_service import DEFAULT_INTERVAL_SECONDS as DEFAULT_KEEPALIVE_INTERVAL
 from railassist.bootstrap import create_application, default_data_dir
 from railassist.config import TaskConfig, load_config
 from railassist.domain.errors import RailAssistError
@@ -38,13 +39,15 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("logout", help="清除本地保存的会话")
     commands.add_parser("whoami", help="检查官方页面登录状态")
     keepalive = commands.add_parser(
-        "keepalive", help="登录保活：周期性续期官方会话并重新落盘（Ctrl+C 退出）")
-    keepalive.add_argument("--interval", type=int, default=300,
-                           help="续期间隔秒数（默认 300，最小 60）")
+        "keepalive", help="登录保活：周期性续期官方会话（checkUser + 一次官方页面访问）并重新落盘")
+    keepalive.add_argument("--interval", type=int, default=DEFAULT_KEEPALIVE_INTERVAL,
+                           help=f"续期间隔秒数（默认 {DEFAULT_KEEPALIVE_INTERVAL}，最小 60）")
     keepalive.add_argument("--cycles", type=int, default=None,
                            help="只续期 N 次后退出（测试用）")
     keepalive.add_argument("--stop-on-invalid", action="store_true",
                            help="一旦下单登录态失效就结束（测量/诊断用）")
+    keepalive.add_argument("--no-page-visit", action="store_true",
+                           help="不做官方页面轻量访问，只发 checkUser（对照实验用）")
 
     verify = commands.add_parser("verify", help="P0 现场验证：一次真实只读查询并登记能力")
     verify.add_argument("--from", dest="from_station", default="北京南")
@@ -276,8 +279,9 @@ def _run_keepalive(app, args) -> int:
 
     service = KeepAliveService(
         app.railway, app.railway.session, interval_seconds=args.interval,
-        on_status=stamp)
-    stamp(f"开始登录保活：每 {service.interval_seconds} 秒续期一次（Ctrl+C 退出）…")
+        visit_page=not args.no_page_visit, on_status=stamp)
+    stamp(f"开始登录保活：每 {service.interval_seconds} 秒续期一次"
+          f"（含官方页面访问：{'是' if service.visit_page else '否'}；Ctrl+C 退出）…")
     result = service.run(max_cycles=args.cycles, stop_on_invalid=args.stop_on_invalid)
     stamp(f"保活结束：{result}")
     emit({"keepalive": result})

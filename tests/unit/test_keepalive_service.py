@@ -33,6 +33,34 @@ class _FakeSession:
         return "session.bin"
 
 
+class _FakePage:
+    def __init__(self, fail: bool = False):
+        self.fail = fail
+        self.visits: list[str] = []
+        self.closed = False
+
+    def goto(self, url, **kwargs):
+        if self.fail:
+            raise RuntimeError("模拟页面访问失败")
+        self.visits.append(url)
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeContext:
+    def __init__(self, page: _FakePage):
+        self.page = page
+        self.new_pages = 0
+
+    def new_page(self):
+        self.new_pages += 1
+        return self.page
+
+
 class _FakeRailway:
     def __init__(self, results=(True,), session=None):
         self.results = list(results)
@@ -120,6 +148,52 @@ class KeepAliveServiceTests(unittest.TestCase):
     def test_interval_has_floor(self):
         service = KeepAliveService(_FakeRailway(), _FakeSession(), interval_seconds=1)
         self.assertEqual(service.interval_seconds, MIN_INTERVAL_SECONDS)
+
+    def test_default_interval_is_under_sliding_timeout(self):
+        """默认间隔必须明显小于“约 10 分钟无活动即失效”的滑动窗口。"""
+        service = KeepAliveService(_FakeRailway(), _FakeSession())
+        self.assertLessEqual(service.interval_seconds, 240)
+        self.assertGreaterEqual(service.interval_seconds, MIN_INTERVAL_SECONDS)
+
+    def test_lightweight_page_visit_happens_each_cycle(self):
+        """每次续期顺带一次官方页面访问（更像真人，也给站内会话真实活动）。"""
+        clock = _Clock()
+        page = _FakePage()
+        session = _FakeSession()
+        session._context = _FakeContext(page)
+        railway = _FakeRailway((True,), session=session)
+        service = KeepAliveService(railway, session, interval_seconds=60,
+                                   sleep=_sleep(clock), wall_clock=clock)
+        service.run(max_cycles=3)
+        self.assertEqual(len(page.visits), 3)
+        self.assertTrue(all("leftTicket" in url for url in page.visits))
+        self.assertEqual(session.saved, 3)
+
+    def test_page_visit_failure_does_not_break_renewal(self):
+        """页面访问失败不影响续期与落盘（保活不能因为页面慢就中断）。"""
+        clock = _Clock()
+        page = _FakePage(fail=True)
+        session = _FakeSession()
+        session._context = _FakeContext(page)
+        railway = _FakeRailway((True,), session=session)
+        messages = []
+        service = KeepAliveService(railway, session, interval_seconds=60,
+                                   sleep=_sleep(clock), on_status=messages.append,
+                                   wall_clock=clock)
+        result = service.run(max_cycles=2)
+        self.assertTrue(result["booking_login_valid"])
+        self.assertEqual(session.saved, 2)
+        self.assertTrue(any("页面访问未成功" in m for m in messages))
+
+    def test_visit_can_be_disabled(self):
+        clock = _Clock()
+        page = _FakePage()
+        session = _FakeSession()
+        session._context = _FakeContext(page)
+        railway = _FakeRailway((True,), session=session)
+        KeepAliveService(railway, session, interval_seconds=60, sleep=_sleep(clock),
+                         visit_page=False, wall_clock=clock).run(max_cycles=2)
+        self.assertEqual(page.visits, [])
 
     def test_should_stop_ends_loop(self):
         clock = _Clock()

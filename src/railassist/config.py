@@ -55,6 +55,23 @@ class TaskConfig:
     # （确认页核对 7.86s vs 复用页面 2.39s）。
     # 而 17:00 那次“复用页面失败”也可能是**会话过老**导致（当天会话已 4 小时 50 分），
     # 与“复用页面”本身无关——故保留该开关用于 A/B 复验，以决定能否拿回这 5 秒。
+    order_fastpath: bool = False
+    # 确认页直达（**默认关**）：原设想是命中瞬间从结果行取出"预订"token 直接拼确认页
+    # URL，省掉第二次整页加载。
+    # 2026-09-24 真机实测否决了这条路（江都→南京 2026-10-08 C3856，见
+    # docs/2026-09-24-真机验证-直达路径不成立.md）：
+    #   官方"预订"是 **POST 表单 + 服务端会话上下文**——
+    #   `POST /otn/confirmPassenger/initDc?N`（body 只有 `_json_att=`，referer=结果页），
+    #   车次/区间/token 都不在 URL 里；用 GET 拼参数直达，官方返回"系统忙，请稍后重试"，
+    #   确认页打不开（raw / 再编码两种 token 共 6 次全部失败）。
+    # 因此该开关默认关闭：打开只会白花一次导航（失败后回退），不再带来任何收益。
+    # 代码与探针保留，供"两步 POST（submitOrderRequest → initDc）"方案复验。
+    order_two_step: bool = False
+    # **两步 POST**（默认关，等真机验证后再定默认值）：在已加载的结果页里
+    # `POST /otn/leftTicket/submitOrderRequest`（secretStr 原样 + 官方字段）建立服务端
+    # 上下文，再用表单 `POST /otn/confirmPassenger/initDc?N` 进确认页——
+    # 与官方点击"预订"的请求链完全一致，但省掉"重新导航结果页"那一次整页加载。
+    # 失败会自动回退到点击路径；开关打开时热循环会顺带回读命中行的"预订"参数。
     sale_at: str | None = None  # 开售时间（ISO 8601 含时区）；车票未开售时抢票必填
     seat_position: str = ""  # 在线选座偏好：A/B/C/D/F，空=系统自动分配
     passenger_refs: tuple[str, ...] = ()  # 授权乘车人引用（真实姓名或演示引用）
@@ -117,7 +134,8 @@ class TaskConfig:
         if type(self.waitlist_max_prepayment_fen) is not int or self.waitlist_max_prepayment_fen < 1:
             raise ConfigError("waitlist_max_prepayment_fen 必须是正整数。")
         for name in ("waitlist_enabled", "waitlist_auto_submit", "waitlist_accept_added_trains",
-                     "auto_submit", "student_ticket", "rush_mode", "dry_run", "order_reuse_page"):
+                     "auto_submit", "student_ticket", "rush_mode", "dry_run", "order_reuse_page",
+                     "order_fastpath", "order_two_step"):
             if not isinstance(getattr(self, name), bool):
                 raise ConfigError(f"{name} 必须是布尔值。")
         sp = self.seat_position

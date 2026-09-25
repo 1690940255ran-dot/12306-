@@ -28,6 +28,41 @@ VERIFIED_MARKERS = {
     "sale_time": "2026-09-19 官方起售页 queryAllCacheSaleTime 接口（页面自身调用）",
 }
 
+# 两步 POST（复刻官方“预订”链路）。真机抓包见 docs/2026-09-24-真机验证-直达路径不成立.md。
+_SUBMIT_ORDER_REQUEST_JS = """
+async (payload) => {
+    try {
+        const r = await fetch('/otn/leftTicket/submitOrderRequest', {
+            method: 'POST', credentials: 'include',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                      'X-Requested-With': 'XMLHttpRequest'},
+            body: payload.body,
+        });
+        let json = null;
+        try { json = await r.json(); } catch (e) { json = {parse_error: String(e)}; }
+        return {status: r.status, json: json};
+    } catch (e) {
+        return {status: -1, json: {error: String(e)}};
+    }
+}
+"""
+
+# 官方就是用一个表单 POST 到 initDc?N（body 只有 _json_att=）。
+_CONFIRM_INITDC_FORM_JS = """
+(action) => {
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = action;
+    const field = document.createElement('input');
+    field.type = 'hidden';
+    field.name = '_json_att';
+    field.value = '';
+    form.appendChild(field);
+    document.body.appendChild(form);
+    form.submit();
+}
+"""
+
 
 def _station_sale_clock(records: list[dict], telecode: str) -> str | None:
     """车站的**每日起售时刻**（"HH:MM"）。
@@ -131,6 +166,11 @@ class BrowserRailwayAdapter:
         self.session = session
         self.catalog = catalog
         self._verified = dict(verified or {})
+        # 最近一次命中的原始行信息（含 onclick 原文）：拼确认页直达链接时要用
+        # onclick 里的原车次号（参数里的车次号是官方内部编号，不能拿显示车次号替代）。
+        self._last_hit: dict | None = None
+        # 最近一次两步下单的 submitOrderRequest 原始响应（诊断用）。
+        self._last_two_step_response: dict | None = None
 
     # ---------- 能力 ----------
 
@@ -224,10 +264,24 @@ class BrowserRailwayAdapter:
         button.click()
 
     def read_hit(self) -> str | None:
-        # 每次读取都重跑扫描：补装观察器（结果表可能迟到）+ 主动扫描当前行
-        return self.session.page.evaluate(
-            "() => { if (window.__ra_scan) window.__ra_scan();"
-            " return window.__ra_hit || null; }")
+        detail = self.read_hit_detail()
+        return detail["train"] if detail else None
+
+    def read_hit_detail(self) -> dict | None:
+        """读命中明细（车次 + 该行“预订”onclick 参数）。
+
+        每次读取都重跑页面内扫描：补装观察器（结果表可能迟到）+ 主动扫描当前行。
+        带上 onclick 参数是为了命中后**直达确认页**，省掉重新加载结果页那一步。
+        """
+        from railassist.adapters.browser.left_ticket import read_hit_detail
+        detail = read_hit_detail(self.session.page)
+        if detail is None:
+            # 命中一旦消失（例如官方刷新后表格重渲染），缓存的 token 也必须作废，
+            # 否则可能拿旧 token 去开确认页。
+            self._last_hit = None
+        else:
+            self._last_hit = detail
+        return detail
 
     # ---------- 起售时间 ----------
 
@@ -311,14 +365,87 @@ class BrowserRailwayAdapter:
             raise RailAssistError("当前页面已不是余票结果页，候选已失效；不执行提交。")
         return self._prepare_order_on_loaded_results(intent)
 
-    def _prepare_order_on_loaded_results(self, intent) -> "PreparedOrder":
+    def prepare_order_direct(self, intent, url: str) -> "PreparedOrder":
+        """命中后直达确认页（token 来自命中瞬间那一次扫描）。
+
+        与“重新导航结果页再点预订”相比省掉一次整页加载（实测约 2~5 秒），
+        但**核对标准不变**：确认页上的车次/日期/区间/乘车人/票价仍逐项校验，
+        任一不符都报错转人工。导航失败/URL 不符时抛错，由调用方回退点击路径。
+        """
+        self._require("submit_order")
+        from railassist.adapters.browser.order_page import ConfirmOrderPage
+        page = self.session.page
+        ConfirmOrderPage(page).open_direct(url)
+        return self._prepare_order_on_loaded_results(intent, page_ready=True)
+
+    def prepare_order_two_step(self, intent, params: tuple[str, ...]) -> "PreparedOrder":
+        """两步 POST 复刻官方“预订”链路（真机抓包得出，见 left_ticket 的注释）：
+
+        1) 在**当前结果页**上下文里 `POST /otn/leftTicket/submitOrderRequest`
+           （secretStr 原样、其余字段照官方），把车次/区间写入服务端上下文；
+        2) 用表单 `POST /otn/confirmPassenger/initDc?N` 导航到确认页（与官方同款请求）。
+
+        比“重新导航结果页 + 点预订”少一次整页加载；任何一步不成立都抛错，
+        由调用方回退到点击路径。**只打开确认页，不提交订单**。
+        """
+        self._require("submit_order")
+        from railassist.adapters.browser.left_ticket import submit_order_request_body
+        from railassist.adapters.browser.order_page import ConfirmOrderPage
+        page = self.session.page
+        if "leftTicket" not in page.url:
+            raise RailAssistError("两步下单要求仍在余票结果页；将回退点击路径。")
+        body = self._two_step_body(intent, params)
+        if body is None:
+            raise RailAssistError("两步下单参数不完整；将回退点击路径。")
+        result = page.evaluate(_SUBMIT_ORDER_REQUEST_JS, {"body": body})
+        self._last_two_step_response = result
+        try:
+            page.evaluate(_CONFIRM_INITDC_FORM_JS, CONFIRM_INITDC_PATH)
+        except Exception:
+            # 表单提交会销毁执行上下文，Playwright 会抛错——属预期。
+            pass
+        try:
+            page.wait_for_url("**/confirmPassenger/**", timeout=15000)
+        except Exception:
+            pass
+        if "confirmPassenger" not in page.url:
+            raise RailAssistError(
+                "两步下单未到达确认订单页；将回退点击路径。"
+                f"｜诊断：submitOrderRequest={str(result)[:200]}；"
+                f"URL={str(page.url)[:140]}")
+        ConfirmOrderPage(page).wait_ready(timeout_ms=6000)
+        return self._prepare_order_on_loaded_results(intent, page_ready=True)
+
+    def _two_step_body(self, intent, params: tuple[str, ...]) -> str | None:
+        """从结果页 DOM 取 `train_date/back_train_date`，与 onclick 参数拼成表单体。"""
+        from railassist.adapters.browser.left_ticket import submit_order_request_body
+        train_date = intent.date
+        back_train_date = ""
+        try:
+            dom = self.session.page.evaluate(
+                """() => {
+                    const g = (id) => { const el = document.getElementById(id);
+                        return el && el.value ? el.value : ''; };
+                    return {train_date: g('train_date'), back_train_date: g('back_train_date')};
+                }""")
+            if isinstance(dom, dict):
+                train_date = dom.get("train_date") or train_date
+                back_train_date = dom.get("back_train_date") or ""
+        except Exception:
+            pass
+        return submit_order_request_body(
+            params, train_date=train_date, back_train_date=back_train_date,
+            from_name=intent.from_station, to_name=intent.to_station)
+
+    def _prepare_order_on_loaded_results(self, intent, page_ready: bool = False) -> "PreparedOrder":
         from railassist.adapters.browser.order_page import ConfirmOrderPage
         from datetime import datetime, timedelta
         page = self.session.page
         from_code = self.catalog.code_for(intent.from_station)
         to_code = self.catalog.code_for(intent.to_station)
         order = ConfirmOrderPage(page)
-        order.open_from_results(intent.train_code, from_code=from_code, to_code=to_code)
+        if not page_ready:
+            order.open_from_results(intent.train_code, from_code=from_code, to_code=to_code)
         header = order.header()
         if header["train_code"] != intent.train_code or header["date"] != intent.date:
             raise RailAssistError(
@@ -329,7 +456,12 @@ class BrowserRailwayAdapter:
                 f"确认页乘降站与预期不符：页面实际为 {header['from_station']}→{header['to_station']}，"
                 f"预期 {intent.from_station}→{intent.to_station}；"
                 "可能为同城站或灵活行到站，请人工确认后调整任务或更换车次。")
+        # 命中瞬间不等待整页渲染完：先读一次，读不到再按元素就绪轮询等
+        # 首位乘车人的票种行（固定等待会让票在同一秒被别人拿走）。
         available = order.list_passengers()
+        if not available:
+            order.wait_passenger_row(intent.passenger_refs[0])
+            available = order.list_passengers()
         missing = [
             name for name in intent.passenger_refs
             if not any(name == p or name == p.split("（")[0].split("(", 1)[0] for p in available)

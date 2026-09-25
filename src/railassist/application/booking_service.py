@@ -26,6 +26,14 @@ class BookingError(RailAssistError):
     pass
 
 
+# 只有这些错误说明“直达确认页这一步本身没走通”（官方换结构 / token 被拒 / 导航失败），
+# 才允许回退到重新导航；其余错误（会话失效、乘车人/席别不符…）必须原样上报。
+_DIRECT_NAVIGATION_ERRORS = (
+    "未到达确认订单页", "确认页直达导航失败", "直达确认页", "不是确认页地址",
+    "当前页面已不是余票结果页",
+)
+
+
 def task_revision(config: dict) -> str:
     """任务版本 = 任务配置内容的哈希；关键条件变化 → 新版本 → 旧授权失效。"""
     return hashlib.sha1(
@@ -63,8 +71,14 @@ class BookingService:
     def precheck_and_prepare(self, task_id: str, match: dict, passenger_refs: tuple[str, ...],
                              action: str = "order", *, automatic: bool = False,
                              session_prevalidated: bool = False,
-                             use_current_page: bool = False) -> dict:
-        """按 §5.4 执行前检查链；返回落库后的 PREPARED 订单尝试。"""
+                             use_current_page: bool = False,
+                             direct_navigation: bool = False) -> dict:
+        """按 §5.4 执行前检查链；返回落库后的 PREPARED 订单尝试。
+
+        direct_navigation=True 表示抢票命中后会用**命中行 token 直达确认页**
+        （而不是重新导航结果页再点“预订”）；它只影响确认页的打开方式，
+        核对、金额复检与单次提交的规则完全相同。
+        """
         task = self.repository.get(task_id)
         if task.status in (TaskStatus.PAUSED,) or is_terminal(task.status):
             raise BookingError(f"任务状态 {task.status} 不允许下单。")
@@ -126,6 +140,7 @@ class BookingService:
                 "task_id": task_id, "match": match, "passenger_refs": list(passenger_refs),
                 "intent": intent.__dict__ | {"passenger_refs": list(intent.passenger_refs)},
                 "automatic": automatic, "use_current_page": use_current_page,
+                "direct_navigation": bool(direct_navigation),
                 "environment": environment, "account_ref": session.account_ref,
             },
         )
@@ -151,11 +166,19 @@ class BookingService:
                                       "（官方侧未收到任何提交动作）。"})
         return True
 
-    def submit(self, attempt_id: str, dry_run: bool = False) -> dict:
+    def submit(self, attempt_id: str, dry_run: bool = False,
+               direct_url: str | None = None,
+               two_step_params: tuple[str, ...] | None = None) -> dict:
         """提交一次订单。
 
         dry_run=True 为**演练模式**：完整走完官方确认页核对与金额/授权复检，
         但在点击“提交订单”之前停止——绝不产生订单（用于真实模拟验证）。
+
+        two_step_params：抢票命中行的“预订”onclick 参数。给出时优先用**两步 POST**
+        复刻官方链路（submitOrderRequest → initDc）打开确认页，省掉重新加载结果页；
+        direct_url：GET 直达链接（**真机已否决**，默认关闭，保留供复验）。
+        两条快路径失败都会回退到“重新导航 + 点预订”，且都必须在确认页上完成
+        车次/日期/区间/乘车人/票价的逐项核对，然后才可能提交。
         """
         attempt = self.repository.get_attempt(attempt_id)
         if attempt["status"] != OrderStatus.PREPARED.value:
@@ -200,11 +223,9 @@ class BookingService:
         try:
             if is_waitlist:
                 prepared = self.railway.prepare_waitlist(intent)
-            elif attempt["payload"].get("use_current_page") and hasattr(
-                    self.railway, "prepare_order_from_current_page"):
-                prepared = self.railway.prepare_order_from_current_page(intent)
             else:
-                prepared = self.railway.prepare_order(intent)
+                prepared = self._prepare_order_intent(intent, attempt, direct_url,
+                                                      two_step_params)
         except Exception as exc:
             # 打开/核对确认页失败：尝试留在 SUBMITTING 不可行（页面未提交过），回退人工。
             # 演练模式未进入 SUBMITTING，PREPARED 不能转 NEEDS_USER_ACTION，
@@ -307,6 +328,46 @@ class BookingService:
             ("候补订单已提交，请支付预付款。" if is_waitlist else "订单已提交，请按官方截止时间完成支付。"),
             attempt_id)
         return attempt
+
+    def _prepare_order_intent(self, intent, attempt: dict, direct_url: str | None = None,
+                              two_step_params: tuple[str, ...] | None = None):
+        """打开并核对确认页：两步 POST → GET 直达 → 复用当前页 → 重新导航（依次回退）。
+
+        两条快路径（两步 POST 复刻官方链路 / GET 直达）都可能被官方拒绝。
+        只有**确定是“这一步没走通”**（导航异常 / 没落到确认页，见
+        `_DIRECT_NAVIGATION_ERRORS`）才回退——会话过期、控件不符之类的错误
+        直接上报，绝不靠再导航一次掩盖真实原因。回退事实写进核对摘要（落库）。
+        """
+        note = None
+        if two_step_params and hasattr(self.railway, "prepare_order_two_step"):
+            try:
+                return self.railway.prepare_order_two_step(intent, two_step_params)
+            except RailAssistError as exc:
+                if not any(marker in str(exc) for marker in _DIRECT_NAVIGATION_ERRORS):
+                    raise
+                note = f"two_step: {type(exc).__name__}: {exc}"
+                self._notify(f"order_twostep_fallback:{attempt['id']}",
+                             f"两步下单失败（{type(exc).__name__}），已回退到重新导航下单。",
+                             attempt["id"])
+        if direct_url and hasattr(self.railway, "prepare_order_direct"):
+            try:
+                return self.railway.prepare_order_direct(intent, direct_url)
+            except RailAssistError as exc:
+                if not any(marker in str(exc) for marker in _DIRECT_NAVIGATION_ERRORS):
+                    raise
+                note = f"{type(exc).__name__}: {exc}"
+                self._notify(f"order_fastpath_fallback:{attempt['id']}",
+                             f"确认页直达失败（{type(exc).__name__}），已回退到重新导航下单。",
+                             attempt["id"])
+        if attempt["payload"].get("use_current_page") and hasattr(
+                self.railway, "prepare_order_from_current_page"):
+            prepared = self.railway.prepare_order_from_current_page(intent)
+        else:
+            prepared = self.railway.prepare_order(intent)
+        if note:
+            prepared = replace(prepared, summary={**prepared.summary,
+                                                   "direct_navigation_error": note})
+        return prepared
 
     def _needs_user(self, attempt_id: str, message: str,
                     reason_code: str = "needs_user_prepare", dry_run: bool = False) -> dict:
